@@ -52,10 +52,39 @@ namespace VNKitEditor
         void OnUndoRedo()
         {
             if (graph == null || story == null) return;
+            story.InvalidateCache();
             so = new SerializedObject(story);
             graph.Load(story);
             timeline.Refresh();
             inspector.MarkDirtyRepaint();
+        }
+
+        // ------------------------------------------------------------ validation
+
+        void DrawValidation()
+        {
+            if (story == null) return;
+            var issues = VNGraphValidator.Validate(story);
+            showValidation = EditorGUILayout.Foldout(showValidation,
+                issues.Count == 0 ? "Validation: OK" : $"Validation: {issues.Count} issue(s)", true);
+            if (!showValidation) return;
+
+            if (issues.Count == 0)
+            {
+                EditorGUILayout.HelpBox("No dangling links, no missing start frame.", MessageType.Info);
+                return;
+            }
+            foreach (var issue in issues)
+            {
+                EditorGUILayout.HelpBox(issue.message, issue.severity == VNValidationSeverity.Error ? MessageType.Error : MessageType.Warning);
+                if (!string.IsNullOrEmpty(issue.nodeId) && GUILayout.Button("Select frame", GUILayout.Width(100f)))
+                {
+                    selectedNodeId = issue.nodeId;
+                    timeline.selectedNodeId = issue.nodeId;
+                    graph.SelectNode(issue.nodeId);
+                }
+            }
+            EditorGUILayout.Space(6f);
         }
 
         void CreateGUI()
@@ -134,6 +163,9 @@ namespace VNKitEditor
 
         // ------------------------------------------------------------ inspector
 
+        bool showValidation = true;
+        bool showVariables;
+
         void DrawInspector()
         {
             if (story == null)
@@ -145,6 +177,8 @@ namespace VNKitEditor
             so.Update();
 
             inspectorScroll = EditorGUILayout.BeginScrollView(inspectorScroll);
+
+            DrawValidation();
 
             int idx = story.nodes.FindIndex(n => n.id == selectedNodeId);
             bool generalChanged = false, choicesChanged = false;
@@ -162,11 +196,17 @@ namespace VNKitEditor
             }
 
             EditorGUILayout.Space(10f);
+            showVariables = EditorGUILayout.Foldout(showVariables, "Story Variables", true);
+            if (showVariables)
+                EditorGUILayout.PropertyField(so.FindProperty("variables"), new GUIContent("Variables"), true);
+
+            EditorGUILayout.Space(6f);
             EditorGUILayout.PropertyField(so.FindProperty("defaultTextStyle"),
                 new GUIContent("Default Text Style (all frames)"), true);
 
             EditorGUILayout.EndScrollView();
             so.ApplyModifiedProperties();
+            if (generalChanged || choicesChanged) story.InvalidateCache();
 
             if (idx >= 0)
             {
@@ -199,9 +239,7 @@ namespace VNKitEditor
             {
                 Prop(np, "background");
                 Prop(np, "backgroundAnim");
-                Prop(np, "character");
-                Prop(np, "slot");
-                Prop(np, "characterAnim");
+                EditorGUILayout.PropertyField(np.FindPropertyRelative("characters"), new GUIContent("Characters"), true);
             }
             else
             {
@@ -220,6 +258,10 @@ namespace VNKitEditor
             Prop(np, "overrideTextStyle");
             if (np.FindPropertyRelative("overrideTextStyle").boolValue)
                 Prop(np, "textStyle");
+
+            EditorGUILayout.Space(4f);
+            EditorGUILayout.PropertyField(np.FindPropertyRelative("onEnterEffects"),
+                new GUIContent("On Enter (set variables)"), true);
             generalChanged = EditorGUI.EndChangeCheck();
 
             // ---- choices
@@ -246,6 +288,12 @@ namespace VNKitEditor
                     EditorStyles.miniLabel, GUILayout.Width(95f));
                 if (GUILayout.Button("\u2715", GUILayout.Width(24f))) removeAt = i;
                 EditorGUILayout.EndHorizontal();
+
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(el.FindPropertyRelative("conditions"), new GUIContent("Shown if"), true);
+                EditorGUILayout.PropertyField(el.FindPropertyRelative("effects"), new GUIContent("On pick"), true);
+                EditorGUI.indentLevel--;
+                EditorGUILayout.Space(2f);
             }
             if (EditorGUI.EndChangeCheck()) choicesChanged = true;
 
@@ -271,6 +319,68 @@ namespace VNKitEditor
                 added.FindPropertyRelative("targetId").stringValue = carry ?? "";
                 choicesChanged = true;
             }
+
+            // ---- conditional branches (only used when the frame has no choices)
+            if (cp.arraySize == 0)
+            {
+                EditorGUILayout.Space(8f);
+                EditorGUILayout.LabelField("Conditional Branches (first match wins, else \u2192 Next)", EditorStyles.boldLabel);
+                DrawBranches(np);
+            }
+        }
+
+        void DrawBranches(SerializedProperty np)
+        {
+            var bp = np.FindPropertyRelative("branches");
+            int removeAt = -1;
+
+            for (int i = 0; i < bp.arraySize; i++)
+            {
+                var el = bp.GetArrayElementAtIndex(i);
+                var targetProp = el.FindPropertyRelative("targetId");
+                var target = story.GetNode(targetProp.stringValue);
+
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField((i + 1) + ".", GUILayout.Width(18f));
+                if (GUILayout.Button(target != null ? "\u2192 " + target.title : "\u2192 (pick frame)", EditorStyles.popup))
+                    ShowFramePicker(targetProp);
+                if (GUILayout.Button("\u2715", GUILayout.Width(24f))) removeAt = i;
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(el.FindPropertyRelative("conditions"), new GUIContent("If"), true);
+                EditorGUI.indentLevel--;
+            }
+
+            if (removeAt >= 0) bp.DeleteArrayElementAtIndex(removeAt);
+
+            if (GUILayout.Button("+ Add branch"))
+            {
+                bp.InsertArrayElementAtIndex(bp.arraySize);
+                var added = bp.GetArrayElementAtIndex(bp.arraySize - 1);
+                added.FindPropertyRelative("targetId").stringValue = "";
+                var conds = added.FindPropertyRelative("conditions");
+                conds.ClearArray();
+            }
+        }
+
+        void ShowFramePicker(SerializedProperty targetIdProp)
+        {
+            var menu = new GenericMenu();
+            foreach (var n in story.nodes)
+            {
+                string title = string.IsNullOrEmpty(n.title) ? "(untitled)" : n.title;
+                string id = n.id;
+                menu.AddItem(new GUIContent(title), false, () =>
+                {
+                    targetIdProp.serializedObject.Update();
+                    targetIdProp.stringValue = id;
+                    targetIdProp.serializedObject.ApplyModifiedProperties();
+                    story.InvalidateCache();
+                });
+            }
+            if (story.nodes.Count == 0) menu.AddDisabledItem(new GUIContent("No frames yet"));
+            menu.ShowAsContext();
         }
 
         static void Prop(SerializedProperty parent, string relative)

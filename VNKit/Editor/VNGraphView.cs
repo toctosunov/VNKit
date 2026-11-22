@@ -163,6 +163,7 @@ namespace VNKitEditor
             };
             Story.nodes.Add(d);
             if (string.IsNullOrEmpty(Story.startNodeId)) Story.startNodeId = d.id;
+            Story.InvalidateCache();
             EditorUtility.SetDirty(Story);
             return AddView(d);
         }
@@ -172,6 +173,7 @@ namespace VNKitEditor
             if (Story == null) return;
             Undo.RecordObject(Story, "Set Start Frame");
             Story.startNodeId = id;
+            Story.InvalidateCache();
             EditorUtility.SetDirty(Story);
             RefreshAllVisuals();
             GraphChanged?.Invoke();
@@ -258,6 +260,7 @@ namespace VNKitEditor
                 branched = true;
             }
 
+            Story.InvalidateCache();
             EditorUtility.SetDirty(Story);
             RefreshNode(from);
             return branched;
@@ -294,6 +297,7 @@ namespace VNKitEditor
                     if (el is VNNodeView nv) nv.Data.position = nv.GetPosition().position;
             }
 
+            Story.InvalidateCache();
             EditorUtility.SetDirty(Story);
             GraphChanged?.Invoke();
             return change;

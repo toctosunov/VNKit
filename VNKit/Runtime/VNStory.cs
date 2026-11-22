@@ -11,6 +11,15 @@ namespace VNKit
     public enum VNAnimType { None, Fade, SlideFromLeft, SlideFromRight, SlideFromBottom, SlideFromTop, Scale, Punch, Shake }
     public enum VNTrack { Background = 0, Music = 1 }
 
+    /// <summary>Type of a story variable. Unity can't serialize a union, so each def carries one default per type.</summary>
+    public enum VNVarType { Bool, Int, Float, String }
+
+    /// <summary>How a condition compares a variable against a literal value.</summary>
+    public enum VNCompareOp { Equals, NotEquals, Greater, GreaterOrEqual, Less, LessOrEqual }
+
+    /// <summary>How an effect changes a variable.</summary>
+    public enum VNVarOpType { Set, Add, Toggle }
+
     [Serializable]
     public class VNAnim
     {
@@ -20,11 +29,158 @@ namespace VNKit
         public Ease ease = Ease.OutQuad;
     }
 
+    /// <summary>Declares one story variable and its default value. Lives on the VNStory asset.</summary>
+    [Serializable]
+    public class VNVariableDef
+    {
+        public string name = "flag";
+        public VNVarType type = VNVarType.Bool;
+        public bool boolDefault;
+        public int intDefault;
+        public float floatDefault;
+        public string stringDefault = "";
+
+        /// <summary>The default value as a string, in the same format VNVariables stores values in.</summary>
+        public string DefaultAsString()
+        {
+            switch (type)
+            {
+                case VNVarType.Bool: return boolDefault ? "true" : "false";
+                case VNVarType.Int: return intDefault.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                case VNVarType.Float: return floatDefault.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                default: return stringDefault ?? "";
+            }
+        }
+    }
+
+    /// <summary>A single "if variable OP value" test. A list of these is an AND.</summary>
+    [Serializable]
+    public class VNCondition
+    {
+        public string variable;
+        public VNCompareOp op = VNCompareOp.Equals;
+        public string value = "true";
+
+        public bool Evaluate(VNVariables vars)
+        {
+            if (vars == null || string.IsNullOrEmpty(variable)) return true;
+            var type = vars.GetType(variable);
+            switch (type)
+            {
+                case VNVarType.Bool:
+                {
+                    bool a = vars.GetBool(variable);
+                    bool b = string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1";
+                    return op == VNCompareOp.NotEquals ? a != b : a == b;
+                }
+                case VNVarType.Int:
+                {
+                    int a = vars.GetInt(variable);
+                    int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int b);
+                    return Compare(a, b);
+                }
+                case VNVarType.Float:
+                {
+                    float a = vars.GetFloat(variable);
+                    float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float b);
+                    return Compare(a, b);
+                }
+                default:
+                {
+                    string a = vars.GetString(variable) ?? "";
+                    string b = value ?? "";
+                    return op == VNCompareOp.NotEquals ? a != b : a == b;
+                }
+            }
+        }
+
+        bool Compare(float a, float b)
+        {
+            switch (op)
+            {
+                case VNCompareOp.Equals: return Mathf.Approximately(a, b);
+                case VNCompareOp.NotEquals: return !Mathf.Approximately(a, b);
+                case VNCompareOp.Greater: return a > b;
+                case VNCompareOp.GreaterOrEqual: return a >= b;
+                case VNCompareOp.Less: return a < b;
+                case VNCompareOp.LessOrEqual: return a <= b;
+                default: return true;
+            }
+        }
+
+        public static bool EvaluateAll(List<VNCondition> conditions, VNVariables vars)
+        {
+            if (conditions == null) return true;
+            for (int i = 0; i < conditions.Count; i++)
+                if (!conditions[i].Evaluate(vars)) return false;
+            return true;
+        }
+    }
+
+    /// <summary>A change applied to a variable: on a node when it's shown, or on a choice when it's picked.</summary>
+    [Serializable]
+    public class VNVariableOp
+    {
+        public string variable;
+        public VNVarOpType op = VNVarOpType.Set;
+        public string value = "true";
+
+        public void Apply(VNVariables vars)
+        {
+            if (vars == null || string.IsNullOrEmpty(variable)) return;
+            var type = vars.GetType(variable);
+            switch (type)
+            {
+                case VNVarType.Bool:
+                    bool b = string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1";
+                    vars.SetBool(variable, op == VNVarOpType.Toggle ? !vars.GetBool(variable) : b);
+                    break;
+                case VNVarType.Int:
+                    int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int iv);
+                    vars.SetInt(variable, op == VNVarOpType.Add ? vars.GetInt(variable) + iv : iv);
+                    break;
+                case VNVarType.Float:
+                    float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float fv);
+                    vars.SetFloat(variable, op == VNVarOpType.Add ? vars.GetFloat(variable) + fv : fv);
+                    break;
+                default:
+                    vars.SetString(variable, op == VNVarOpType.Add ? (vars.GetString(variable) ?? "") + (value ?? "") : (value ?? ""));
+                    break;
+            }
+        }
+
+        public static void ApplyAll(List<VNVariableOp> ops, VNVariables vars)
+        {
+            if (ops == null) return;
+            for (int i = 0; i < ops.Count; i++) ops[i].Apply(vars);
+        }
+    }
+
+    /// <summary>One answer in a branch. Hidden at runtime unless its conditions pass.</summary>
     [Serializable]
     public class VNChoice
     {
         public string text = "Choice";
         [HideInInspector] public string targetId;
+        public List<VNCondition> conditions = new List<VNCondition>();
+        public List<VNVariableOp> effects = new List<VNVariableOp>();
+    }
+
+    /// <summary>A conditional fork used when a frame has no choices: first matching branch wins, else nextId.</summary>
+    [Serializable]
+    public class VNConditionalBranch
+    {
+        public List<VNCondition> conditions = new List<VNCondition>();
+        [HideInInspector] public string targetId;
+    }
+
+    /// <summary>One character shown in a Scene frame. A frame lists every character visible in it.</summary>
+    [Serializable]
+    public class VNCharacterCue
+    {
+        public Sprite sprite;
+        public VNSlot slot = VNSlot.Center;
+        public VNAnim anim = new VNAnim();
     }
 
     /// <summary>Look of the text box: font, colors, outlines, panel. One default per story, optional override per frame.</summary>
@@ -68,9 +224,7 @@ namespace VNKit
         // Scene layout
         public Sprite background;            // optional override; otherwise taken from the Background track
         public VNAnim backgroundAnim = new VNAnim();
-        public Sprite character;
-        public VNSlot slot = VNSlot.Center;
-        public VNAnim characterAnim = new VNAnim();
+        public List<VNCharacterCue> characters = new List<VNCharacterCue>();   // every character visible in this frame
 
         // SingleImage layout
         public Sprite image;
@@ -89,8 +243,13 @@ namespace VNKit
         public AudioClip sfx;
         [Range(0f, 1f)] public float sfxVolume = 1f;
 
-        // Branching: no choices -> goes to nextId, otherwise player must pick
+        // Variables: applied the moment this frame is shown
+        public List<VNVariableOp> onEnterEffects = new List<VNVariableOp>();
+
+        // Branching: choices take priority; with no choices, the first matching conditional branch wins;
+        // with neither, the frame goes to nextId.
         public List<VNChoice> choices = new List<VNChoice>();
+        public List<VNConditionalBranch> branches = new List<VNConditionalBranch>();
     }
 
     /// <summary>A clip on the Background or Music track. Spans frames from startNodeId to endNodeId (in story order).</summary>
@@ -114,28 +273,67 @@ namespace VNKit
     {
         public string startNodeId;
         public VNTextStyle defaultTextStyle = new VNTextStyle();
+        public List<VNVariableDef> variables = new List<VNVariableDef>();
         public List<VNNodeData> nodes = new List<VNNodeData>();
         public List<VNClip> clips = new List<VNClip>();
+
+        // ---------------------------------------------------------------- cache
+        // GetNode/GetOrderedNodes are called very often (every frame shown, every timeline repaint).
+        // Rebuilding an id -> node map and the DFS order on every call doesn't scale past a handful of
+        // frames, so both are cached here and only rebuilt when something structural changes.
+        [NonSerialized] Dictionary<string, VNNodeData> _index;
+        [NonSerialized] List<VNNodeData> _orderedCache;
+        [NonSerialized] bool _dirty = true;
+
+        /// <summary>Call after any structural edit (add/remove a frame, change a link, change startNodeId).
+        /// The editor calls this for edits made through code; property-field edits invalidate via OnValidate.</summary>
+        public void InvalidateCache()
+        {
+            _dirty = true;
+        }
+
+        void OnEnable() => _dirty = true;
+        void OnValidate() => _dirty = true;
+
+        void RebuildIfNeeded()
+        {
+            if (!_dirty && _index != null && _orderedCache != null) return;
+            _index = new Dictionary<string, VNNodeData>(nodes.Count);
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                var n = nodes[i];
+                if (n != null && !string.IsNullOrEmpty(n.id)) _index[n.id] = n;
+            }
+            _orderedCache = BuildOrderedNodes();
+            _dirty = false;
+        }
 
         public VNNodeData GetNode(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
-            for (int i = 0; i < nodes.Count; i++)
-                if (nodes[i].id == id) return nodes[i];
-            return null;
+            RebuildIfNeeded();
+            _index.TryGetValue(id, out var n);
+            return n;
         }
 
         /// <summary>
-        /// Frames in "story order": depth-first from the start frame, first choice / next first.
+        /// Frames in "story order": depth-first from the start frame, first choice / branch / next first.
         /// Unreachable frames are appended at the end. Timeline clips are measured in this order.
         /// </summary>
         public List<VNNodeData> GetOrderedNodes()
+        {
+            RebuildIfNeeded();
+            return _orderedCache;
+        }
+
+        List<VNNodeData> BuildOrderedNodes()
         {
             var result = new List<VNNodeData>();
             var visited = new HashSet<string>();
             var stack = new Stack<string>();
 
-            var start = GetNode(startNodeId);
+            VNNodeData start = null;
+            if (!string.IsNullOrEmpty(startNodeId)) _index.TryGetValue(startNodeId, out start);
             if (start == null && nodes.Count > 0) start = nodes[0];
             if (start != null) stack.Push(start.id);
 
@@ -143,14 +341,24 @@ namespace VNKit
             {
                 var id = stack.Pop();
                 if (string.IsNullOrEmpty(id) || visited.Contains(id)) continue;
-                var n = GetNode(id);
-                if (n == null) continue;
+                if (!_index.TryGetValue(id, out var n)) continue;
                 visited.Add(id);
                 result.Add(n);
 
                 var targets = new List<string>();
-                if (n.choices.Count == 0) targets.Add(n.nextId);
-                else foreach (var c in n.choices) targets.Add(c.targetId);
+                if (n.choices.Count > 0)
+                {
+                    foreach (var c in n.choices) targets.Add(c.targetId);
+                }
+                else if (n.branches.Count > 0)
+                {
+                    foreach (var b in n.branches) targets.Add(b.targetId);
+                    targets.Add(n.nextId);
+                }
+                else
+                {
+                    targets.Add(n.nextId);
+                }
                 for (int i = targets.Count - 1; i >= 0; i--) stack.Push(targets[i]);
             }
 
@@ -158,6 +366,14 @@ namespace VNKit
                 if (!visited.Contains(n.id)) { visited.Add(n.id); result.Add(n); }
 
             return result;
+        }
+
+        public VNVariableDef GetVariableDef(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            for (int i = 0; i < variables.Count; i++)
+                if (variables[i].name == name) return variables[i];
+            return null;
         }
     }
 }

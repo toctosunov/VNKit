@@ -29,9 +29,10 @@ namespace VNKitEditor
             var bg = NewImage("Background", root.transform, Color.white, false);
             Stretch(bg.rectTransform);
 
-            var character = NewImage("Character", root.transform, Color.white, false);
-            character.preserveAspect = true;
-            Anchor(character.rectTransform, 0.25f, 0f, 0.75f, 0.95f);
+            // three fixed character slots so several characters can be on screen at once
+            var charLeft = NewCharacterSlot("Character Left", root.transform, 0.22f);
+            var charCenter = NewCharacterSlot("Character Center", root.transform, 0.5f);
+            var charRight = NewCharacterSlot("Character Right", root.transform, 0.78f);
 
             var single = NewImage("SingleImage", root.transform, Color.white, false);
             single.preserveAspect = true;
@@ -86,7 +87,9 @@ namespace VNKitEditor
 
             // wire
             player.backgroundImage = bg;
-            player.characterImage = character;
+            player.leftCharacterImage = charLeft;
+            player.centerCharacterImage = charCenter;
+            player.rightCharacterImage = charRight;
             player.singleImage = single;
             player.textPanel = panelGroup;
             player.speakerLabel = speaker;
@@ -121,6 +124,15 @@ namespace VNKitEditor
             var go = new GameObject(name, typeof(RectTransform));
             go.transform.SetParent(parent, false);
             return (RectTransform)go.transform;
+        }
+
+        /// <summary>A character slot anchored at a fixed horizontal position (0..1 of the canvas width).</summary>
+        static Image NewCharacterSlot(string name, Transform parent, float centerX)
+        {
+            var img = NewImage(name, parent, Color.white, false);
+            img.preserveAspect = true;
+            Anchor(img.rectTransform, centerX - 0.25f, 0f, centerX + 0.25f, 0.95f);
+            return img;
         }
 
         static Image NewImage(string name, Transform parent, Color color, bool raycast)

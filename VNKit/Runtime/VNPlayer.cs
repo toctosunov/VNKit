@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using DG.Tweening;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
@@ -7,7 +6,13 @@ using UnityEngine.UI;
 
 namespace VNKit
 {
-    /// <summary>Plays a VNStory. Create the UI with Tools > Visual Novel > Create Player In Scene.</summary>
+    /// <summary>
+    /// Plays a VNStory. Create the UI with Tools > Visual Novel > Create Player In Scene.
+    /// This class is the orchestrator: it drives the flow (show frame -> type text -> wait for
+    /// input/choice -> go to the next frame) and delegates the actual work to small presenters
+    /// (<see cref="VNVisualLayerController"/>, <see cref="VNTextPresenter"/>, <see cref="VNChoicePresenter"/>,
+    /// <see cref="VNAudioController"/>) plus the <see cref="VNVariables"/> store for conditions/effects.
+    /// </summary>
     public class VNPlayer : MonoBehaviour
     {
         [Header("Story")]
@@ -16,8 +21,12 @@ namespace VNKit
 
         [Header("Scene layers")]
         public Image backgroundImage;
-        public Image characterImage;
         public Image singleImage;
+
+        [Header("Characters (leave unused slots empty)")]
+        public Image leftCharacterImage;
+        public Image centerCharacterImage;
+        public Image rightCharacterImage;
 
         [Header("Text")]
         public CanvasGroup textPanel;
@@ -40,80 +49,33 @@ namespace VNKit
 
         public UnityEvent onStoryEnd;
 
-        class Layer
-        {
-            public Image image;
-            public Sprite shown;
-            public VNSlot slot;
-        }
+        /// <summary>The story's variables for the current playthrough. Also what conditions/effects read and write.</summary>
+        public VNVariables Variables { get; } = new VNVariables();
 
-        Layer bgLayer, charLayer, singleLayer;
+        VNVisualLayerController visuals;
+        VNTextPresenter textPresenter;
+        VNChoicePresenter choicePresenter;
+        VNAudioController audio;
+
         List<VNNodeData> order = new List<VNNodeData>();
+        readonly Dictionary<string, int> orderIndex = new Dictionary<string, int>();
         VNNodeData current;
-        Tween typeTween;
-        Tween musicTween;
-        bool typing;
-        VNClip activeMusic;
+        List<VNChoice> currentEligibleChoices;
         VNClip activeBg;
-        VNTextStyle activeStyle;
         bool waitingForChoices;
-        TMP_FontAsset sceneBodyFont, sceneSpeakerFont;
 
         void Awake()
         {
-            if (bodyLabel != null) sceneBodyFont = bodyLabel.font;
-            if (speakerLabel != null) sceneSpeakerFont = speakerLabel.font;
-            bgLayer = MakeLayer(backgroundImage);
-            charLayer = MakeLayer(characterImage);
-            singleLayer = MakeLayer(singleImage);
-            if (characterImage) characterImage.preserveAspect = true;
-            if (singleImage) singleImage.preserveAspect = true;
+            visuals = new VNVisualLayerController(backgroundImage, singleImage, leftCharacterImage, centerCharacterImage, rightCharacterImage);
+            textPresenter = new VNTextPresenter(textPanel, speakerLabel, bodyLabel);
+            choicePresenter = new VNChoicePresenter(choicesContainer, choiceButtonTemplate);
+            audio = new VNAudioController(musicSource, sfxSource);
+
+            choicePresenter.AlignToBody(textPresenter.PanelTransform, textPresenter.BodyRect);
             if (advanceButton) advanceButton.onClick.AddListener(Advance);
-            if (choiceButtonTemplate) choiceButtonTemplate.gameObject.SetActive(false);
-            if (textPanel) textPanel.alpha = 0f;
 
-            SetupChoicesContainer();
-            EnsureLayerOrder();
-            if (characterImage == null)
-                Debug.LogWarning("VNPlayer: 'Character Image' is not assigned, so characters will not be shown.", this);
-        }
-
-        /// <summary>Answers live inside the text panel, exactly where the body text is.</summary>
-        void SetupChoicesContainer()
-        {
-            if (choicesContainer == null) return;
-
-            if (textPanel != null && !choicesContainer.IsChildOf(textPanel.transform))
-            {
-                choicesContainer.SetParent(textPanel.transform, false);
-                if (bodyLabel != null)
-                {
-                    var b = bodyLabel.rectTransform;
-                    choicesContainer.anchorMin = b.anchorMin;
-                    choicesContainer.anchorMax = b.anchorMax;
-                    choicesContainer.offsetMin = b.offsetMin;
-                    choicesContainer.offsetMax = b.offsetMax;
-                }
-            }
-
-            var vlg = choicesContainer.GetComponent<VerticalLayoutGroup>();
-            if (vlg == null) vlg = choicesContainer.gameObject.AddComponent<VerticalLayoutGroup>();
-            vlg.spacing = 8f;
-            vlg.childAlignment = TextAnchor.MiddleCenter;
-            vlg.childControlWidth = true;
-            vlg.childControlHeight = true;
-            vlg.childForceExpandWidth = true;
-            vlg.childForceExpandHeight = false;
-        }
-
-        /// <summary>The character must be drawn above the background whatever the hierarchy order is.</summary>
-        void EnsureLayerOrder()
-        {
-            if (backgroundImage == null || characterImage == null) return;
-            var bgT = backgroundImage.transform;
-            var chT = characterImage.transform;
-            if (bgT.parent == chT.parent && chT.GetSiblingIndex() < bgT.GetSiblingIndex())
-                bgT.SetSiblingIndex(chT.GetSiblingIndex());
+            if (leftCharacterImage == null && centerCharacterImage == null && rightCharacterImage == null)
+                Debug.LogWarning("VNPlayer: no character slot image is assigned, so characters will not be shown.", this);
         }
 
         void Start()
@@ -121,25 +83,22 @@ namespace VNKit
             if (playOnStart && story != null) Play(story);
         }
 
-        static Layer MakeLayer(Image img)
-        {
-            var l = new Layer { image = img };
-            if (img != null)
-            {
-                SetAlpha(img, 0f);
-                img.enabled = false;
-            }
-            return l;
-        }
-
         // ---------------------------------------------------------------- flow
 
         public void Play(VNStory s)
         {
+            if (s == null)
+            {
+                Debug.LogWarning("VNPlayer: Play() called with a null story.", this);
+                return;
+            }
             story = s;
             order = story.GetOrderedNodes();
-            activeMusic = null;
+            RebuildOrderIndex();
+            Variables.Init(story);
+            audio.Reset();
             activeBg = null;
+
             var start = story.GetNode(story.startNodeId);
             if (start == null && story.nodes.Count > 0) start = story.nodes[0];
             if (start == null) { End(); return; }
@@ -153,20 +112,22 @@ namespace VNKit
 
         public void Advance()
         {
-            if (current == null) return;
-            if (typing)
+            if (current == null || story == null) return;
+            if (textPresenter.Typing) { textPresenter.SkipTyping(); return; }
+            if (waitingForChoices) { waitingForChoices = false; ShowChoices(); return; }
+            if (currentEligibleChoices != null && currentEligibleChoices.Count > 0) return;   // must pick a choice
+            GoTo(ResolveNext(current));
+        }
+
+        string ResolveNext(VNNodeData n)
+        {
+            if (n.choices.Count == 0 && n.branches != null)
             {
-                if (typeTween != null && typeTween.IsActive()) typeTween.Complete();
-                return;
+                for (int i = 0; i < n.branches.Count; i++)
+                    if (VNCondition.EvaluateAll(n.branches[i].conditions, Variables))
+                        return n.branches[i].targetId;
             }
-            if (waitingForChoices)
-            {
-                waitingForChoices = false;
-                ShowChoices(current);
-                return;
-            }
-            if (current.choices.Count > 0) return;   // must pick a choice
-            GoTo(current.nextId);
+            return n.nextId;
         }
 
         void GoTo(string id)
@@ -179,32 +140,39 @@ namespace VNKit
         void End()
         {
             current = null;
-            ClearChoices();
+            currentEligibleChoices = null;
+            choicePresenter.Clear();
             onStoryEnd?.Invoke();
         }
 
         void Show(VNNodeData n)
         {
             current = n;
-            ClearChoices();
+            currentEligibleChoices = null;
+            waitingForChoices = false;
+            choicePresenter.Clear();
 
-            int idx = order.IndexOf(n);
+            VNVariableOp.ApplyAll(n.onEnterEffects, Variables);
+
+            int idx = IndexOfId(n.id);
             activeBg = FindClip(VNTrack.Background, idx);
-            ApplyMusic(FindClip(VNTrack.Music, idx));
+            audio.ApplyMusic(FindClip(VNTrack.Music, idx));
             ApplyVisuals(n);
 
-            if (n.sfx != null && sfxSource != null) sfxSource.PlayOneShot(n.sfx, n.sfxVolume);
-            StartText(n);
+            if (n.sfx != null) audio.PlaySfx(n.sfx, n.sfxVolume);
+            textPresenter.Show(story, n, OnTextDone);
         }
 
         // ---------------------------------------------------------------- timeline clips
 
-        int IndexOfId(string id)
+        void RebuildOrderIndex()
         {
-            for (int i = 0; i < order.Count; i++)
-                if (order[i].id == id) return i;
-            return -1;
+            orderIndex.Clear();
+            for (int i = 0; i < order.Count; i++) orderIndex[order[i].id] = i;
         }
+
+        int IndexOfId(string id) =>
+            !string.IsNullOrEmpty(id) && orderIndex.TryGetValue(id, out int i) ? i : -1;
 
         VNClip FindClip(VNTrack track, int nodeIndex)
         {
@@ -226,372 +194,97 @@ namespace VNKit
             return best;
         }
 
-        void ApplyMusic(VNClip clip)
-        {
-            if (clip == activeMusic) return;
-            var old = activeMusic;
-            activeMusic = clip;
-            if (musicSource == null) return;
-
-            if (musicTween != null && musicTween.IsActive()) musicTween.Kill();
-            var seq = DOTween.Sequence();
-            if (musicSource.isPlaying)
-                seq.Append(musicSource.DOFade(0f, old != null ? old.fadeOut : 0.5f));
-
-            seq.AppendCallback(() =>
-            {
-                if (clip == null || clip.audio == null)
-                {
-                    musicSource.Stop();
-                    return;
-                }
-                musicSource.clip = clip.audio;
-                musicSource.loop = clip.loop;
-                musicSource.volume = 0f;
-                musicSource.Play();
-            });
-
-            if (clip != null && clip.audio != null)
-                seq.Append(musicSource.DOFade(clip.volume, clip.fadeIn));
-
-            musicTween = seq;
-        }
-
         // ---------------------------------------------------------------- visuals
 
         void ApplyVisuals(VNNodeData n)
         {
             if (n.layout == VNLayout.Scene)
             {
-                Sprite bg = null;
+                Sprite bg = n.background;
                 VNAnim bgAnim = n.backgroundAnim;
-                if (n.background != null) bg = n.background;
-                else if (activeBg != null && activeBg.sprite != null)
+                if (bg == null && activeBg != null && activeBg.sprite != null)
                 {
                     bg = activeBg.sprite;
                     bgAnim = new VNAnim { type = VNAnimType.Fade, duration = activeBg.fadeIn };
                 }
-                ShowLayer(bgLayer, bg, bgAnim);
-                ShowLayer(charLayer, n.character, n.characterAnim, n.slot, true);
-                HideLayer(singleLayer);
+                visuals.ApplyScene(bg, bgAnim, n.characters);
             }
             else
             {
-                HideLayer(bgLayer);
-                HideLayer(charLayer);
-                ShowLayer(singleLayer, n.image, n.imageAnim);
+                visuals.ApplySingleImage(n.image, n.imageAnim);
             }
         }
 
-        void ShowLayer(Layer l, Sprite sprite, VNAnim anim, VNSlot slot = VNSlot.Center, bool isCharacter = false)
-        {
-            if (l.image == null) return;
-            if (sprite == null) { HideLayer(l); return; }
-
-            bool changed = l.shown != sprite || (isCharacter && l.slot != slot);
-            bool emphasis = anim.type == VNAnimType.Punch || anim.type == VNAnimType.Shake;
-            if (!changed && !emphasis) return;
-
-            l.shown = sprite;
-            l.slot = slot;
-            l.image.sprite = sprite;
-            l.image.enabled = true;
-            if (isCharacter) PlaceCharacter(l.image, slot);
-            Animate(l.image, anim);
-        }
-
-        void HideLayer(Layer l)
-        {
-            if (l.image == null || l.shown == null) return;
-            l.shown = null;
-            l.image.DOKill();
-            l.image.rectTransform.DOKill();
-            l.image.DOFade(0f, 0.25f).OnComplete(() =>
-            {
-                if (l.shown == null) l.image.enabled = false;
-            });
-        }
-
-        static void PlaceCharacter(Image img, VNSlot slot)
-        {
-            float x = slot == VNSlot.Left ? 0.22f : slot == VNSlot.Right ? 0.78f : 0.5f;
-            var rt = img.rectTransform;
-            rt.anchorMin = new Vector2(x - 0.25f, 0f);
-            rt.anchorMax = new Vector2(x + 0.25f, 0.95f);
-            rt.offsetMin = Vector2.zero;
-            rt.offsetMax = Vector2.zero;
-        }
-
-        static void SetAlpha(Graphic g, float a)
-        {
-            var c = g.color;
-            c.a = a;
-            g.color = c;
-        }
-
-        void Animate(Image img, VNAnim a)
-        {
-            var rt = img.rectTransform;
-            img.DOKill();
-            rt.DOKill();
-            rt.anchoredPosition = Vector2.zero;
-            rt.localScale = Vector3.one;
-            SetAlpha(img, 1f);
-
-            float d = Mathf.Max(0.01f, a.duration);
-            float w = 1920f, h = 1080f;
-            if (img.canvas != null)
-            {
-                var crt = img.canvas.rootCanvas.transform as RectTransform;
-                if (crt != null) { w = crt.rect.width; h = crt.rect.height; }
-            }
-
-            switch (a.type)
-            {
-                case VNAnimType.Fade:
-                    SetAlpha(img, 0f);
-                    img.DOFade(1f, d).SetDelay(a.delay).SetEase(a.ease);
-                    break;
-                case VNAnimType.SlideFromLeft:
-                    Slide(img, rt, new Vector2(-w * 0.35f, 0f), a, d);
-                    break;
-                case VNAnimType.SlideFromRight:
-                    Slide(img, rt, new Vector2(w * 0.35f, 0f), a, d);
-                    break;
-                case VNAnimType.SlideFromBottom:
-                    Slide(img, rt, new Vector2(0f, -h * 0.35f), a, d);
-                    break;
-                case VNAnimType.SlideFromTop:
-                    Slide(img, rt, new Vector2(0f, h * 0.35f), a, d);
-                    break;
-                case VNAnimType.Scale:
-                    rt.localScale = Vector3.one * 0.6f;
-                    SetAlpha(img, 0f);
-                    rt.DOScale(1f, d).SetDelay(a.delay).SetEase(a.ease);
-                    img.DOFade(1f, d).SetDelay(a.delay);
-                    break;
-                case VNAnimType.Punch:
-                    rt.DOPunchScale(Vector3.one * 0.12f, d, 6, 0.6f).SetDelay(a.delay);
-                    break;
-                case VNAnimType.Shake:
-                    rt.DOShakeAnchorPos(d, 30f, 25, 90f).SetDelay(a.delay);
-                    break;
-                default:
-                    break;
-            }
-        }
-
-        void Slide(Image img, RectTransform rt, Vector2 from, VNAnim a, float d)
-        {
-            rt.anchoredPosition = from;
-            SetAlpha(img, 0f);
-            rt.DOAnchorPos(Vector2.zero, d).SetDelay(a.delay).SetEase(a.ease);
-            img.DOFade(1f, d).SetDelay(a.delay);
-        }
-
-        // ---------------------------------------------------------------- text
-
-        void ApplyTextStyle(VNNodeData n)
-        {
-            var s = n.overrideTextStyle ? n.textStyle : (story != null ? story.defaultTextStyle : null);
-            if (s == null) return;
-            activeStyle = s;
-
-            if (bodyLabel != null)
-            {
-                bodyLabel.font = s.font != null ? s.font : sceneBodyFont;
-                bodyLabel.fontSize = s.fontSize;
-                bodyLabel.fontStyle = s.fontStyle;
-                bodyLabel.color = s.textColor;
-                bodyLabel.outlineWidth = s.outlineWidth;
-                bodyLabel.outlineColor = s.outlineColor;
-            }
-
-            if (speakerLabel != null)
-            {
-                speakerLabel.font = s.font != null ? s.font : sceneSpeakerFont;
-                speakerLabel.fontSize = s.speakerSize;
-                speakerLabel.color = s.speakerColor;
-            }
-
-            if (textPanel != null)
-            {
-                var img = textPanel.GetComponent<Image>();
-                if (img != null)
-                {
-                    img.color = s.panelColor;
-                    img.sprite = s.panelSprite;
-                    img.type = s.panelSprite != null ? Image.Type.Sliced : Image.Type.Simple;
-
-                    var border = textPanel.GetComponent<Outline>();
-                    if (border == null) border = textPanel.gameObject.AddComponent<Outline>();
-                    border.effectColor = s.borderColor;
-                    border.effectDistance = new Vector2(s.borderWidth, -s.borderWidth);
-                    border.enabled = s.borderWidth > 0f;
-                }
-            }
-        }
-
-        void StartText(VNNodeData n)
-        {
-            ApplyTextStyle(n);
-            waitingForChoices = false;
-            if (bodyLabel != null) bodyLabel.gameObject.SetActive(true);
-            bool hasText = !string.IsNullOrWhiteSpace(n.text);
-            bool hasSpeaker = !string.IsNullOrWhiteSpace(n.speaker);
-
-            if (speakerLabel != null)
-            {
-                speakerLabel.text = n.speaker;
-                speakerLabel.gameObject.SetActive(hasSpeaker);
-            }
-            if (textPanel != null)
-            {
-                textPanel.DOKill();
-                textPanel.DOFade(hasText || hasSpeaker || n.choices.Count > 0 ? 1f : 0f, 0.2f);
-            }
-
-            if (typeTween != null && typeTween.IsActive()) typeTween.Kill();
-            typing = false;
-
-            if (bodyLabel == null)
-            {
-                OnTextDone();
-                return;
-            }
-
-            bodyLabel.text = n.text ?? "";
-            bodyLabel.ForceMeshUpdate();
-            int total = bodyLabel.textInfo.characterCount;
-
-            if (n.typeSpeed <= 0f || total == 0)
-            {
-                bodyLabel.maxVisibleCharacters = 99999;
-                OnTextDone();
-                return;
-            }
-
-            bodyLabel.maxVisibleCharacters = 0;
-            typing = true;
-            int counter = 0;
-            typeTween = DOTween.To(() => counter, v =>
-                {
-                    counter = v;
-                    bodyLabel.maxVisibleCharacters = v;
-                }, total, total / n.typeSpeed)
-                .SetEase(Ease.Linear)
-                .OnComplete(() =>
-                {
-                    typing = false;
-                    bodyLabel.maxVisibleCharacters = 99999;
-                    OnTextDone();
-                });
-        }
+        // ---------------------------------------------------------------- text & choices
 
         void OnTextDone()
         {
-            if (current == null || current.choices.Count == 0) return;
+            if (current == null) return;
+            currentEligibleChoices = FilterChoices(current.choices);
+            if (currentEligibleChoices.Count == 0) return;   // nothing to pick: Advance() will move on via branches/nextId
+
             if (choicesAfterClick && !string.IsNullOrWhiteSpace(current.text)) waitingForChoices = true;
-            else ShowChoices(current);
+            else ShowChoices();
         }
 
-        // ---------------------------------------------------------------- choices
-
-        void ShowChoices(VNNodeData n)
+        List<VNChoice> FilterChoices(List<VNChoice> choices)
         {
-            if (choicesContainer == null || choiceButtonTemplate == null) return;
-            var s = activeStyle;
+            var result = new List<VNChoice>(choices.Count);
+            for (int i = 0; i < choices.Count; i++)
+                if (VNCondition.EvaluateAll(choices[i].conditions, Variables)) result.Add(choices[i]);
+            return result;
+        }
 
-            // the answers replace the body text inside the same panel
-            if (bodyLabel != null) bodyLabel.gameObject.SetActive(false);
+        void ShowChoices()
+        {
+            textPresenter.SetBodyVisible(false);
+            choicePresenter.Show(currentEligibleChoices, textPresenter.ActiveStyle, textPresenter.FallbackBodyFont, Choose);
+        }
 
-            for (int i = 0; i < n.choices.Count; i++)
+        void Choose(VNChoice choice)
+        {
+            VNVariableOp.ApplyAll(choice.effects, Variables);
+            choicePresenter.Clear();
+            currentEligibleChoices = null;
+            GoTo(choice.targetId);
+        }
+
+        // ---------------------------------------------------------------- save / load
+
+        /// <summary>A snapshot of where the player is and what the story's variables are, ready for VNSaveSystem.</summary>
+        public VNSaveData CaptureState()
+        {
+            var data = new VNSaveData
             {
-                var choice = n.choices[i];
-                var btn = Instantiate(choiceButtonTemplate, choicesContainer);
-                btn.gameObject.SetActive(true);
-                StyleChoiceButton(btn, s);
-
-                var label = btn.GetComponentInChildren<TMP_Text>();
-                if (label != null)
-                {
-                    label.text = choice.text;
-                    label.margin = new Vector4(16f, 2f, 16f, 2f);
-                    label.enableAutoSizing = true;
-                    label.fontSizeMin = 18f;
-                    label.fontSizeMax = Mathf.Max(18f, s != null ? s.fontSize : 34f);
-                    if (s != null)
-                    {
-                        label.font = s.font != null ? s.font : sceneBodyFont;
-                        label.fontStyle = s.fontStyle;
-                        label.color = s.textColor;
-                        label.outlineWidth = s.outlineWidth;
-                        label.outlineColor = s.outlineColor;
-                    }
-                }
-
-                string target = choice.targetId;
-                btn.onClick.AddListener(() => Choose(target));
-
-                // own group so the buttons stay clickable although the panel itself blocks nothing
-                var cg = btn.GetComponent<CanvasGroup>();
-                if (cg == null) cg = btn.gameObject.AddComponent<CanvasGroup>();
-                cg.ignoreParentGroups = true;
-                cg.interactable = true;
-                cg.blocksRaycasts = true;
-                cg.alpha = 0f;
-                cg.DOFade(1f, 0.25f).SetDelay(i * 0.08f);
-                btn.transform.localScale = Vector3.one * 0.95f;
-                btn.transform.DOScale(1f, 0.25f).SetDelay(i * 0.08f).SetEase(Ease.OutBack);
-            }
+                storyName = story != null ? story.name : null,
+                currentNodeId = current != null ? current.id : null,
+            };
+            Variables.Snapshot(out var names, out var values);
+            data.varNames = names;
+            data.varValues = values;
+            return data;
         }
 
-        void StyleChoiceButton(Button btn, VNTextStyle s)
+        /// <summary>Resumes a previously captured state on the given story (not necessarily the one currently assigned).</summary>
+        public void ApplyState(VNStory s, VNSaveData data)
         {
-            var le = btn.GetComponent<LayoutElement>();
-            if (le == null) le = btn.gameObject.AddComponent<LayoutElement>();
-            le.minHeight = 30f;
-            le.preferredHeight = 60f;
-            le.flexibleHeight = 0f;
-
-            if (s == null) return;
-
-            if (btn.targetGraphic != null) btn.targetGraphic.color = Color.white;
-            btn.transition = Selectable.Transition.ColorTint;
-            var cb = btn.colors;
-            cb.colorMultiplier = 1f;
-            cb.fadeDuration = 0.1f;
-            cb.normalColor = s.choiceColor;
-            cb.disabledColor = s.choiceColor;
-            cb.highlightedColor = s.choiceHoverColor;
-            cb.selectedColor = s.choiceHoverColor;
-            cb.pressedColor = Color.Lerp(s.choiceHoverColor, Color.white, 0.25f);
-            btn.colors = cb;
-
-            var border = btn.GetComponent<Outline>();
-            if (border == null) border = btn.gameObject.AddComponent<Outline>();
-            border.effectColor = s.borderColor;
-            border.effectDistance = new Vector2(s.borderWidth, -s.borderWidth);
-            border.enabled = s.borderWidth > 0f;
-        }
-
-        void Choose(string targetId)
-        {
-            ClearChoices();
-            GoTo(targetId);
-        }
-
-        void ClearChoices()
-        {
-            waitingForChoices = false;
-            if (bodyLabel != null && !bodyLabel.gameObject.activeSelf) bodyLabel.gameObject.SetActive(true);
-            if (choicesContainer == null) return;
-            for (int i = choicesContainer.childCount - 1; i >= 0; i--)
+            if (s == null || data == null)
             {
-                var child = choicesContainer.GetChild(i);
-                if (choiceButtonTemplate != null && child.gameObject == choiceButtonTemplate.gameObject) continue;
-                Destroy(child.gameObject);
+                Debug.LogWarning("VNPlayer: ApplyState() called with a null story or save data.", this);
+                return;
             }
+            story = s;
+            order = story.GetOrderedNodes();
+            RebuildOrderIndex();
+            Variables.Init(story);
+            Variables.Restore(data.varNames, data.varValues);
+            audio.Reset();
+            activeBg = null;
+
+            var node = story.GetNode(data.currentNodeId);
+            if (node == null && story.nodes.Count > 0) node = story.nodes[0];
+            if (node == null) { End(); return; }
+            Show(node);
         }
     }
 }

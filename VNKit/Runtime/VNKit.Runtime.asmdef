@@ -1,0 +1,17 @@
+{
+    "name": "VNKit.Runtime",
+    "rootNamespace": "VNKit",
+    "references": [
+        "Unity.TextMeshPro",
+        "DOTween"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
