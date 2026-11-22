@@ -69,13 +69,25 @@ namespace VNKitEditor
             {
                 var port = v.OutputPorts[i];
                 int idx = (int)port.userData;
-                string targetId = idx < 0 ? v.Data.nextId : (idx < v.Data.choices.Count ? v.Data.choices[idx].targetId : null);
+                string targetId = TargetFor(v.Data, idx);
                 if (string.IsNullOrEmpty(targetId)) continue;
                 if (!views.TryGetValue(targetId, out var target)) continue;
                 var edge = port.ConnectTo(target.InputPort);
                 AddElement(edge);
                 dataEdges.Add(edge);
             }
+        }
+
+        /// <summary>Decodes a port's userData index (choice / branch / Next) into the frame it currently links to.</summary>
+        static string TargetFor(VNNodeData d, int idx)
+        {
+            if (idx <= VNNodeView.BranchIndexBase)
+            {
+                int bi = VNNodeView.BranchIndexBase - idx;
+                return bi < d.branches.Count ? d.branches[bi].targetId : null;
+            }
+            if (idx < 0) return d.nextId;
+            return idx < d.choices.Count ? d.choices[idx].targetId : null;
         }
 
         public VNNodeView GetView(string id)
@@ -137,8 +149,27 @@ namespace VNKitEditor
             var pos = contentViewContainer.WorldToLocal(evt.mousePosition);
             evt.menu.AppendAction("Add Frame", a => CreateNode(pos));
             if (evt.target is VNNodeView nv)
+            {
                 evt.menu.AppendAction("Set as Start Frame", a => SetStart(nv.Data.id));
+                if (nv.Data.choices.Count == 0)
+                    evt.menu.AppendAction("Add Conditional Branch", a => AddBranch(nv));
+            }
             base.BuildContextualMenu(evt);
+        }
+
+        /// <summary>
+        /// Adds an empty conditional branch and gives the frame an "If 1" port to drag, like a choice.
+        /// The condition itself (which variable/op/value) is edited in the inspector, same as a choice's text.
+        /// </summary>
+        void AddBranch(VNNodeView nv)
+        {
+            Undo.RecordObject(Story, "Add Conditional Branch");
+            nv.Data.branches.Add(new VNConditionalBranch());
+            Story.InvalidateCache();
+            EditorUtility.SetDirty(Story);
+            RefreshNode(nv);
+            SelectNode(nv.Data.id);
+            GraphChanged?.Invoke();
         }
 
         /// <summary>Right-click "Add Frame": creates a frame and selects it.</summary>
@@ -234,9 +265,29 @@ namespace VNKitEditor
             bool branched = false;
             Undo.RecordObject(Story, "Connect Frames");
 
-            if (portIndex < 0)
+            if (portIndex <= VNNodeView.BranchIndexBase)
             {
-                if (replace || string.IsNullOrEmpty(d.nextId) || d.nextId == to.Data.id)
+                int bi = VNNodeView.BranchIndexBase - portIndex;
+                if (bi < d.branches.Count)
+                {
+                    d.branches[bi].targetId = to.Data.id;
+                }
+                else
+                {
+                    // the "+ branch" port
+                    d.branches.Add(new VNConditionalBranch { targetId = to.Data.id });
+                    branched = true;
+                }
+            }
+            else if (portIndex < 0)
+            {
+                if (d.branches.Count > 0)
+                {
+                    // this is the "Next (else)" fallback port: branches already fork the story,
+                    // so just rewire the fallback rather than also turning it into choices.
+                    d.nextId = to.Data.id;
+                }
+                else if (replace || string.IsNullOrEmpty(d.nextId) || d.nextId == to.Data.id)
                 {
                     d.nextId = to.Data.id;
                 }
@@ -309,7 +360,13 @@ namespace VNKitEditor
             var to = edge.input != null ? edge.input.node as VNNodeView : null;
             if (from == null || to == null) return;
             int idx = (int)edge.output.userData;
-            if (idx < 0)
+            if (idx <= VNNodeView.BranchIndexBase)
+            {
+                int bi = VNNodeView.BranchIndexBase - idx;
+                if (bi < from.Data.branches.Count && from.Data.branches[bi].targetId == to.Data.id)
+                    from.Data.branches[bi].targetId = null;
+            }
+            else if (idx < 0)
             {
                 if (from.Data.nextId == to.Data.id) from.Data.nextId = null;
             }
@@ -330,6 +387,8 @@ namespace VNKitEditor
                 if (n.nextId == id) n.nextId = null;
                 foreach (var c in n.choices)
                     if (c.targetId == id) c.targetId = null;
+                foreach (var b in n.branches)
+                    if (b.targetId == id) b.targetId = null;
             }
 
             Story.clips.RemoveAll(c => c.startNodeId == id || c.endNodeId == id);

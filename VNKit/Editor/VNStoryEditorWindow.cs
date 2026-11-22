@@ -321,29 +321,34 @@ namespace VNKitEditor
             }
 
             // ---- conditional branches (only used when the frame has no choices)
-            if (cp.arraySize == 0)
-            {
-                EditorGUILayout.Space(8f);
-                EditorGUILayout.LabelField("Conditional Branches (first match wins, else \u2192 Next)", EditorStyles.boldLabel);
-                DrawBranches(np);
-            }
+            if (cp.arraySize == 0 && DrawBranches(np)) choicesChanged = true;
         }
 
-        void DrawBranches(SerializedProperty np)
+        /// <summary>
+        /// Lists the frame's conditional branches. The link itself (which frame a branch points to) is
+        /// set by dragging in the graph, same as a choice - this only shows where it currently points
+        /// (read-only) plus the conditions, which have no graph equivalent and are edited here.
+        /// Returns true if a row was added/removed, so the caller knows to refresh the graph's ports.
+        /// </summary>
+        bool DrawBranches(SerializedProperty np)
         {
+            EditorGUILayout.Space(8f);
+            EditorGUILayout.LabelField("Conditional Branches (first match wins, else \u2192 Next)", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Drag a thread from the frame's \"If N\" / \"+ branch\" port in the graph to link it.",
+                EditorStyles.wordWrappedMiniLabel);
+
             var bp = np.FindPropertyRelative("branches");
             int removeAt = -1;
+            bool structureChanged = false;
 
             for (int i = 0; i < bp.arraySize; i++)
             {
                 var el = bp.GetArrayElementAtIndex(i);
-                var targetProp = el.FindPropertyRelative("targetId");
-                var target = story.GetNode(targetProp.stringValue);
+                var target = story.GetNode(el.FindPropertyRelative("targetId").stringValue);
 
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField((i + 1) + ".", GUILayout.Width(18f));
-                if (GUILayout.Button(target != null ? "\u2192 " + target.title : "\u2192 (pick frame)", EditorStyles.popup))
-                    ShowFramePicker(targetProp);
+                GUILayout.Label(target != null ? "\u2192 " + target.title : "\u2192 (not linked)", EditorStyles.miniLabel);
                 if (GUILayout.Button("\u2715", GUILayout.Width(24f))) removeAt = i;
                 EditorGUILayout.EndHorizontal();
 
@@ -352,35 +357,22 @@ namespace VNKitEditor
                 EditorGUI.indentLevel--;
             }
 
-            if (removeAt >= 0) bp.DeleteArrayElementAtIndex(removeAt);
+            if (removeAt >= 0)
+            {
+                bp.DeleteArrayElementAtIndex(removeAt);
+                structureChanged = true;
+            }
 
             if (GUILayout.Button("+ Add branch"))
             {
                 bp.InsertArrayElementAtIndex(bp.arraySize);
                 var added = bp.GetArrayElementAtIndex(bp.arraySize - 1);
                 added.FindPropertyRelative("targetId").stringValue = "";
-                var conds = added.FindPropertyRelative("conditions");
-                conds.ClearArray();
+                added.FindPropertyRelative("conditions").ClearArray();
+                structureChanged = true;
             }
-        }
 
-        void ShowFramePicker(SerializedProperty targetIdProp)
-        {
-            var menu = new GenericMenu();
-            foreach (var n in story.nodes)
-            {
-                string title = string.IsNullOrEmpty(n.title) ? "(untitled)" : n.title;
-                string id = n.id;
-                menu.AddItem(new GUIContent(title), false, () =>
-                {
-                    targetIdProp.serializedObject.Update();
-                    targetIdProp.stringValue = id;
-                    targetIdProp.serializedObject.ApplyModifiedProperties();
-                    story.InvalidateCache();
-                });
-            }
-            if (story.nodes.Count == 0) menu.AddDisabledItem(new GUIContent("No frames yet"));
-            menu.ShowAsContext();
+            return structureChanged;
         }
 
         static void Prop(SerializedProperty parent, string relative)

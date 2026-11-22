@@ -68,6 +68,11 @@ conditions all pass is where the story goes; if none match, it falls back to the
 This is how you write "if the player picked X earlier, skip ahead" without turning every fork into
 a player-facing choice.
 
+Branches are wired the same way choices are: right-click a frame → **Add Conditional Branch** (or
+drag a thread out of its **+ branch** port once it has one) to add a row, then drag a thread from
+its **"If N"** port to the frame it should jump to. The condition itself (which variable, compare
+op and value) has no graph equivalent and is edited in the inspector, same as a choice's text.
+
 ### Story variables
 
 Declare variables once per story (**Story Variables** foldout in the inspector): a name, a type
@@ -142,8 +147,6 @@ undo/redo).
 
 - No localization: all story text lives directly on the `VNStory` asset.
 - No dialogue log/backlog or auto-play/skip.
-- The node graph has no visual port for conditional branches (task-level branches are edited from
-  the inspector's **Conditional Branches** section instead of dragged like choices are).
 
 ## License
 

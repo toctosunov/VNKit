@@ -13,6 +13,9 @@ namespace VNKitEditor
         /// <summary>userData of the single "Next" port (used when the frame has no choices).</summary>
         public const int NextIndex = -1;
 
+        /// <summary>userData of branch port i is BranchIndexBase - i, kept well clear of NextIndex/choice indices.</summary>
+        public const int BranchIndexBase = -1000;
+
         public VNNodeData Data;
         public Port InputPort;
         public readonly List<Port> OutputPorts = new List<Port>();
@@ -61,22 +64,18 @@ namespace VNKitEditor
         }
 
         /// <summary>
-        /// No choices: one "Next" port that accepts several threads (a 2nd thread turns the frame into a branch).
         /// With choices: one port per choice, plus a "+ choice" port to add another one.
+        /// Without choices but with conditional branches: one "If N" port per branch (drag to link,
+        /// same as a choice), a "+ branch" port to add another, and a "Next (else)" fallback port.
+        /// With neither: a single "Next" port that accepts several threads (a 2nd thread turns the
+        /// frame into a two-choice branch - see VNGraphView.Link).
         /// </summary>
         public void RebuildPorts()
         {
             outputContainer.Clear();
             OutputPorts.Clear();
 
-            if (Data.choices.Count == 0)
-            {
-                var next = MakeOutput("Next", NextIndex, Port.Capacity.Multi);
-                next.tooltip = "Drag a thread out and release on empty space to create the next frame.\n" +
-                               "Drag a second thread from here to split the story into choices.";
-                OutputPorts.Add(next);
-            }
-            else
+            if (Data.choices.Count > 0)
             {
                 for (int i = 0; i < Data.choices.Count; i++)
                     OutputPorts.Add(MakeOutput((i + 1) + ". " + Short(Data.choices[i].text, 18), i, Port.Capacity.Single));
@@ -86,9 +85,61 @@ namespace VNKitEditor
                 add.tooltip = "Drag a thread from here to add another choice.";
                 OutputPorts.Add(add);
             }
+            else
+            {
+                for (int i = 0; i < Data.branches.Count; i++)
+                {
+                    var p = MakeOutput("If " + (i + 1), BranchIndexBase - i, Port.Capacity.Single);
+                    p.portColor = new Color(0.5f, 0.65f, 0.95f);
+                    p.tooltip = DescribeBranch(Data.branches[i]);
+                    OutputPorts.Add(p);
+                }
+
+                if (Data.branches.Count > 0)
+                {
+                    var addBranch = MakeOutput("+ branch", BranchIndexBase - Data.branches.Count, Port.Capacity.Single);
+                    addBranch.portColor = new Color(0.5f, 0.65f, 0.95f);
+                    addBranch.tooltip = "Drag a thread from here to add another conditional branch.";
+                    OutputPorts.Add(addBranch);
+                }
+
+                var next = MakeOutput(Data.branches.Count > 0 ? "Next (else)" : "Next", NextIndex, Port.Capacity.Multi);
+                next.tooltip = Data.branches.Count > 0
+                    ? "Where the story goes if none of the branches above match."
+                    : "Drag a thread out and release on empty space to create the next frame.\n" +
+                      "Drag a second thread from here to split the story into choices.\n" +
+                      "Right-click the frame > Add Conditional Branch for a non-player-facing fork instead.";
+                OutputPorts.Add(next);
+            }
 
             RefreshExpandedState();
             RefreshPorts();
+        }
+
+        static string DescribeBranch(VNConditionalBranch b)
+        {
+            if (b.conditions == null || b.conditions.Count == 0) return "Always matches (no conditions set)";
+            var parts = new List<string>();
+            foreach (var c in b.conditions)
+            {
+                if (string.IsNullOrEmpty(c.variable)) continue;
+                parts.Add($"{c.variable} {OpSymbol(c.op)} {c.value}");
+            }
+            return parts.Count == 0 ? "Always matches (no conditions set)" : string.Join(" AND ", parts);
+        }
+
+        static string OpSymbol(VNCompareOp op)
+        {
+            switch (op)
+            {
+                case VNCompareOp.Equals: return "==";
+                case VNCompareOp.NotEquals: return "!=";
+                case VNCompareOp.Greater: return ">";
+                case VNCompareOp.GreaterOrEqual: return ">=";
+                case VNCompareOp.Less: return "<";
+                case VNCompareOp.LessOrEqual: return "<=";
+                default: return "?";
+            }
         }
 
         Port MakeOutput(string name, int index, Port.Capacity capacity)
