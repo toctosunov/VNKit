@@ -44,6 +44,26 @@ A frame (`VNNodeData`) is one beat of the story: a background + any number of ch
 single full-screen image), a line of dialogue with an optional speaker name and a typewriter
 speed, an optional sound effect, and where to go next.
 
+Every frame has a **kind**, picked from the `Kind` dropdown in its inspector:
+
+- **Story** — an ordinary frame, everything above applies.
+- **Start** — the story's entry point. Every new story asset gets exactly one of these
+  automatically (there's nothing to configure in an empty graph otherwise). It has no content of
+  its own: it plays its own **entrance fade** over a black screen (duration/delay/ease, no exotic
+  slide/scale/punch types — just a plain fade, since this covers the whole screen) and then
+  automatically continues to its **Next** port's target. No player click is needed. Only one Start
+  frame is expected per story; the **Validation** panel flags it if you have zero or more than one.
+- **End** — a terminal frame: it has no outgoing link at all. It plays its own **exit fade**, then
+  either loads a Unity scene (if **Scene To Load** parses to a non-negative build index) or just
+  stays on the now-opaque black screen and ends the story (`VNPlayer.onStoryEnd` fires). Leave
+  **Scene To Load** empty for "just go black". A story can have as many End frames as it has
+  endings.
+
+Start and End are wired into the graph exactly like a choice: right-click the canvas → **Add Start
+Frame** / **Add End Frame** (or use the frame's `Kind` dropdown to convert one), then drag a thread
+from the Start frame's **Next** port to wherever the story should actually begin. Only their fade
+settings (and End's scene field) are edited in the inspector — same as a choice's own text is.
+
 ### Characters
 
 A frame can show up to three characters at once, one per slot (**Left / Center / Right**). Each
@@ -108,8 +128,8 @@ that the same way you would any other scene reference.
 ## Editor validation
 
 The story editor's inspector shows a **Validation** panel: dangling choice/branch/next links,
-frames the start frame can never reach, and a missing start frame. Click **Select frame** on an
-issue to jump straight to it in the graph.
+frames the start frame can never reach, and a missing or duplicated Start frame. Click **Select
+frame** on an issue to jump straight to it in the graph.
 
 ## Architecture
 
@@ -123,7 +143,8 @@ VNKit/
 │   ├── VNVisualLayerController.cs   background / character slots / single-image animation
 │   ├── VNTextPresenter.cs           speaker/body text, style, typewriter
 │   ├── VNChoicePresenter.cs         pooled choice buttons
-│   └── VNAudioController.cs         music crossfade, sfx
+│   ├── VNAudioController.cs         music crossfade, sfx
+│   └── VNCurtainController.cs       full-screen fade for Start/End frames
 └── Editor/
     ├── VNStoryEditorWindow.cs       main window: graph + inspector + timeline
     ├── VNGraphView.cs / VNNodeView.cs / VNPort.cs   the node graph
@@ -147,6 +168,11 @@ undo/redo).
 
 - No localization: all story text lives directly on the `VNStory` asset.
 - No dialogue log/backlog or auto-play/skip.
+- A story created before this version's Start/End frames won't have a Start frame; the runtime
+  falls back to the first frame in the list (same as before), but it's worth adding a proper Start
+  frame via the graph's right-click menu so the entrance fade and the Validation panel both work.
+- Nothing stops you from dragging a link *into* a Start frame from elsewhere in the graph - don't;
+  it's meant to be the one frame nothing else points to.
 
 ## License
 

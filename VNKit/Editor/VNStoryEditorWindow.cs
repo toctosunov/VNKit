@@ -1,3 +1,4 @@
+using System;
 using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine;
@@ -144,6 +145,17 @@ namespace VNKitEditor
             string path = EditorUtility.SaveFilePanelInProject("New Story", "NewStory", "asset", "Where to save the story asset?");
             if (string.IsNullOrEmpty(path)) return;
             var s = CreateInstance<VNStory>();
+
+            // Every story needs exactly one entry point: give it a Start frame right away so there's
+            // always "the first node everything begins from", instead of an empty graph with nothing to play.
+            s.nodes.Add(new VNNodeData
+            {
+                id = Guid.NewGuid().ToString("N"),
+                kind = VNNodeKind.Start,
+                title = "Start",
+                position = new Vector2(80f, 160f)
+            });
+
             AssetDatabase.CreateAsset(s, path);
             AssetDatabase.SaveAssets();
             Bind(s);
@@ -221,7 +233,7 @@ namespace VNKitEditor
                     }
                     else if (generalChanged)
                     {
-                        view.RefreshVisuals(story.startNodeId == view.Data.id);
+                        view.RefreshVisuals();
                     }
                 }
             }
@@ -229,8 +241,42 @@ namespace VNKitEditor
 
         void DrawFrame(SerializedProperty np, out bool generalChanged, out bool choicesChanged)
         {
+            var kindProp = np.FindPropertyRelative("kind");
+            var oldKind = (VNNodeKind)kindProp.enumValueIndex;
+
             EditorGUI.BeginChangeCheck();
             Prop(np, "title");
+            Prop(np, "kind");
+            var kind = (VNNodeKind)kindProp.enumValueIndex;
+            bool kindChanged = kind != oldKind;
+
+            if (kind == VNNodeKind.Start)
+            {
+                EditorGUILayout.Space(4f);
+                EditorGUILayout.HelpBox(
+                    "The Start frame has no content of its own: it plays this fade-in over a black " +
+                    "screen, then moves on to whatever its Next port links to - automatically, no click needed.",
+                    MessageType.Info);
+                Prop(np, "startFade");
+                generalChanged = EditorGUI.EndChangeCheck() || kindChanged;
+                choicesChanged = kindChanged;   // port layout depends on kind
+                return;
+            }
+
+            if (kind == VNNodeKind.End)
+            {
+                EditorGUILayout.Space(4f);
+                EditorGUILayout.HelpBox(
+                    "The End frame is terminal - nothing links out of it. It plays this fade-out over the " +
+                    "screen, then loads the scene below (by build index), or just stays on the black screen if it's empty.",
+                    MessageType.Info);
+                Prop(np, "endFade");
+                Prop(np, "endSceneToLoad");
+                generalChanged = EditorGUI.EndChangeCheck() || kindChanged;
+                choicesChanged = kindChanged;
+                return;
+            }
+
             Prop(np, "layout");
             var layout = (VNLayout)np.FindPropertyRelative("layout").enumValueIndex;
 
@@ -262,7 +308,7 @@ namespace VNKitEditor
             EditorGUILayout.Space(4f);
             EditorGUILayout.PropertyField(np.FindPropertyRelative("onEnterEffects"),
                 new GUIContent("On Enter (set variables)"), true);
-            generalChanged = EditorGUI.EndChangeCheck();
+            generalChanged = EditorGUI.EndChangeCheck() || kindChanged;
 
             // ---- choices
             EditorGUILayout.Space(6f);

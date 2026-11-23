@@ -14,8 +14,8 @@ namespace VNKitEditor
 
     /// <summary>
     /// Static checks over a VNStory graph: dangling links (choice/branch/next pointing at a frame
-    /// that no longer exists), a missing start frame, and frames the story can never reach.
-    /// Pure read-only inspection - run from the editor window, never from the player.
+    /// that no longer exists), a missing or duplicated Start frame, and frames the story can never
+    /// reach. Pure read-only inspection - run from the editor window, never from the player.
     /// </summary>
     public static class VNGraphValidator
     {
@@ -24,12 +24,31 @@ namespace VNKitEditor
             var issues = new List<VNValidationIssue>();
             if (story == null || story.nodes.Count == 0) return issues;
 
-            if (string.IsNullOrEmpty(story.startNodeId) || story.GetNode(story.startNodeId) == null)
+            int startCount = 0;
+            VNNodeData firstStart = null;
+            foreach (var n in story.nodes)
+            {
+                if (n.kind != VNNodeKind.Start) continue;
+                startCount++;
+                if (firstStart == null) firstStart = n;
+            }
+
+            if (startCount == 0)
             {
                 issues.Add(new VNValidationIssue
                 {
-                    message = "No valid start frame is set; the first frame in the list will be used at runtime.",
-                    severity = VNValidationSeverity.Warning
+                    message = "This story has no Start frame. Right-click the graph canvas > \"Add Start Frame\". " +
+                               "Until then, the first frame in the list is used as the entry point.",
+                    severity = VNValidationSeverity.Error
+                });
+            }
+            else if (startCount > 1)
+            {
+                issues.Add(new VNValidationIssue
+                {
+                    message = $"This story has {startCount} Start frames; only one is used as the entry point " +
+                               "(whichever comes first in the frame list). Delete the extra ones.",
+                    severity = VNValidationSeverity.Error
                 });
             }
 
@@ -40,7 +59,16 @@ namespace VNKitEditor
             {
                 string label = string.IsNullOrEmpty(n.title) ? "(untitled)" : n.title;
 
-                if (n.choices.Count > 0)
+                if (n.kind == VNNodeKind.End)
+                {
+                    // terminal: nothing to check, it never links out
+                }
+                else if (n.kind == VNNodeKind.Start)
+                {
+                    if (string.IsNullOrEmpty(n.nextId) || !ids.Contains(n.nextId))
+                        issues.Add(Error($"\"{label}\" (Start) doesn't link to a frame yet.", n.id));
+                }
+                else if (n.choices.Count > 0)
                 {
                     for (int i = 0; i < n.choices.Count; i++)
                     {
@@ -66,7 +94,7 @@ namespace VNKitEditor
                 }
             }
 
-            var start = story.GetNode(story.startNodeId) ?? story.nodes[0];
+            var start = firstStart ?? story.nodes[0];
             var reachable = ReachableFrom(story, start);
             foreach (var n in story.nodes)
             {
@@ -99,7 +127,11 @@ namespace VNKitEditor
                 if (n == null) continue;
                 visited.Add(id);
 
-                if (n.choices.Count > 0)
+                if (n.kind == VNNodeKind.End)
+                {
+                    // terminal, nothing comes after it
+                }
+                else if (n.choices.Count > 0)
                 {
                     foreach (var c in n.choices) stack.Push(c.targetId);
                 }

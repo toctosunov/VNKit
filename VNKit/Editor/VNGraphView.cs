@@ -57,7 +57,7 @@ namespace VNKitEditor
         {
             var v = new VNNodeView(d);
             v.Selected = n => NodeSelected?.Invoke(n);
-            v.RefreshVisuals(d.id == Story.startNodeId);
+            v.RefreshVisuals();
             AddElement(v);
             views[d.id] = v;
             return v;
@@ -121,13 +121,8 @@ namespace VNKitEditor
             }
             v.RebuildPorts();
             ConnectEdges(v);
-            v.RefreshVisuals(v.Data.id == Story.startNodeId);
+            v.RefreshVisuals();
             loading = false;
-        }
-
-        void RefreshAllVisuals()
-        {
-            foreach (var v in views.Values) v.RefreshVisuals(v.Data.id == Story.startNodeId);
         }
 
         // ------------------------------------------------------------ editing
@@ -148,12 +143,12 @@ namespace VNKitEditor
             if (Story == null) return;
             var pos = contentViewContainer.WorldToLocal(evt.mousePosition);
             evt.menu.AppendAction("Add Frame", a => CreateNode(pos));
-            if (evt.target is VNNodeView nv)
-            {
-                evt.menu.AppendAction("Set as Start Frame", a => SetStart(nv.Data.id));
-                if (nv.Data.choices.Count == 0)
-                    evt.menu.AppendAction("Add Conditional Branch", a => AddBranch(nv));
-            }
+            if (!Story.nodes.Exists(n => n.kind == VNNodeKind.Start))
+                evt.menu.AppendAction("Add Start Frame", a => CreateSpecialNode(pos, VNNodeKind.Start, "Start"));
+            evt.menu.AppendAction("Add End Frame", a => CreateSpecialNode(pos, VNNodeKind.End, "Ending"));
+
+            if (evt.target is VNNodeView nv && nv.Data.kind == VNNodeKind.Story && nv.Data.choices.Count == 0)
+                evt.menu.AppendAction("Add Conditional Branch", a => AddBranch(nv));
             base.BuildContextualMenu(evt);
         }
 
@@ -172,42 +167,43 @@ namespace VNKitEditor
             GraphChanged?.Invoke();
         }
 
-        /// <summary>Right-click "Add Frame": creates a frame and selects it.</summary>
+        /// <summary>Right-click "Add Frame": creates an ordinary story frame and selects it.</summary>
         public VNNodeView CreateNode(Vector2 position)
         {
             if (Story == null) return null;
-            var v = CreateNodeInternal(position);
+            var v = CreateNodeInternal(position, VNNodeKind.Story, null);
             ClearSelection();
             AddToSelection(v);
             GraphChanged?.Invoke();
             return v;
         }
 
-        VNNodeView CreateNodeInternal(Vector2 position)
+        /// <summary>Right-click "Add Start Frame" / "Add End Frame": creates a Start or End frame and selects it.</summary>
+        public VNNodeView CreateSpecialNode(Vector2 position, VNNodeKind kind, string title)
+        {
+            if (Story == null) return null;
+            if (kind == VNNodeKind.Start && Story.nodes.Exists(n => n.kind == VNNodeKind.Start)) return null;
+            var v = CreateNodeInternal(position, kind, title);
+            ClearSelection();
+            AddToSelection(v);
+            GraphChanged?.Invoke();
+            return v;
+        }
+
+        VNNodeView CreateNodeInternal(Vector2 position, VNNodeKind kind, string title)
         {
             Undo.RecordObject(Story, "Add Frame");
             var d = new VNNodeData
             {
                 id = Guid.NewGuid().ToString("N"),
                 position = position,
-                title = "Frame " + (Story.nodes.Count + 1)
+                kind = kind,
+                title = title ?? ("Frame " + (Story.nodes.Count + 1))
             };
             Story.nodes.Add(d);
-            if (string.IsNullOrEmpty(Story.startNodeId)) Story.startNodeId = d.id;
             Story.InvalidateCache();
             EditorUtility.SetDirty(Story);
             return AddView(d);
-        }
-
-        public void SetStart(string id)
-        {
-            if (Story == null) return;
-            Undo.RecordObject(Story, "Set Start Frame");
-            Story.startNodeId = id;
-            Story.InvalidateCache();
-            EditorUtility.SetDirty(Story);
-            RefreshAllVisuals();
-            GraphChanged?.Invoke();
         }
 
         // ------------------------------------------------------------ threads (called from VNPort)
@@ -245,7 +241,7 @@ namespace VNKitEditor
             }
 
             int group = Undo.GetCurrentGroup();
-            var to = CreateNodeInternal(contentViewContainer.WorldToLocal(worldPosition));
+            var to = CreateNodeInternal(contentViewContainer.WorldToLocal(worldPosition), VNNodeKind.Story, null);
             bool branched = Link(from, idx, to, false);
             Undo.CollapseUndoOperations(group);
 
@@ -392,12 +388,6 @@ namespace VNKitEditor
             }
 
             Story.clips.RemoveAll(c => c.startNodeId == id || c.endNodeId == id);
-
-            if (Story.startNodeId == id)
-            {
-                Story.startNodeId = Story.nodes.Count > 0 ? Story.nodes[0].id : null;
-                RefreshAllVisuals();
-            }
         }
     }
 }

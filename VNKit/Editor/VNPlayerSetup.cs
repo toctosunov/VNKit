@@ -78,6 +78,12 @@ namespace VNKitEditor
             Stretch(choiceLabel.rectTransform);
             template.gameObject.SetActive(false);
 
+            // full-screen fade used by Start (fade in) / End (fade out) frames. Added last so it
+            // stacks visually above the background/characters/text panel; raycastTarget stays off
+            // (set in VNCurtainController) so it never blocks clicks to the advance button beneath it.
+            var curtain = NewImage("Curtain", root.transform, Color.black, false);
+            Stretch(curtain.rectTransform);
+
             // audio
             var music = root.AddComponent<AudioSource>();
             music.playOnAwake = false;
@@ -99,6 +105,7 @@ namespace VNKitEditor
             player.advanceButton = advanceBtn;
             player.musicSource = music;
             player.sfxSource = sfx;
+            player.curtain = curtain;
 
             EnsureEventSystem();
 

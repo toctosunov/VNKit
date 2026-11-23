@@ -44,6 +44,10 @@ namespace VNKit
         public AudioSource musicSource;
         public AudioSource sfxSource;
 
+        [Header("Transitions")]
+        [Tooltip("Full-screen overlay used by Start frames (fades out to reveal the story) and End frames (fades in to hide it). Optional.")]
+        public Image curtain;
+
         [Tooltip("On: after the question text is read, a click replaces it with the answers. Off: answers replace the text right away.")]
         public bool choicesAfterClick = true;
 
@@ -56,6 +60,7 @@ namespace VNKit
         VNTextPresenter textPresenter;
         VNChoicePresenter choicePresenter;
         VNAudioController audio;
+        VNCurtainController curtainController;
 
         List<VNNodeData> order = new List<VNNodeData>();
         readonly Dictionary<string, int> orderIndex = new Dictionary<string, int>();
@@ -70,6 +75,7 @@ namespace VNKit
             textPresenter = new VNTextPresenter(textPanel, speakerLabel, bodyLabel);
             choicePresenter = new VNChoicePresenter(choicesContainer, choiceButtonTemplate);
             audio = new VNAudioController(musicSource, sfxSource);
+            curtainController = new VNCurtainController(curtain);
 
             choicePresenter.AlignToBody(textPresenter.PanelTransform, textPresenter.BodyRect);
             if (advanceButton) advanceButton.onClick.AddListener(Advance);
@@ -99,8 +105,7 @@ namespace VNKit
             audio.Reset();
             activeBg = null;
 
-            var start = story.GetNode(story.startNodeId);
-            if (start == null && story.nodes.Count > 0) start = story.nodes[0];
+            var start = story.GetStartNode();
             if (start == null) { End(); return; }
             Show(start);
         }
@@ -113,6 +118,7 @@ namespace VNKit
         public void Advance()
         {
             if (current == null || story == null) return;
+            if (current.kind != VNNodeKind.Story) return;   // Start/End frames drive themselves, no player input
             if (textPresenter.Typing) { textPresenter.SkipTyping(); return; }
             if (waitingForChoices) { waitingForChoices = false; ShowChoices(); return; }
             if (currentEligibleChoices != null && currentEligibleChoices.Count > 0) return;   // must pick a choice
@@ -152,6 +158,9 @@ namespace VNKit
             waitingForChoices = false;
             choicePresenter.Clear();
 
+            if (n.kind == VNNodeKind.Start) { ShowStart(n); return; }
+            if (n.kind == VNNodeKind.End) { ShowEnd(n); return; }
+
             VNVariableOp.ApplyAll(n.onEnterEffects, Variables);
 
             int idx = IndexOfId(n.id);
@@ -161,6 +170,27 @@ namespace VNKit
 
             if (n.sfx != null) audio.PlaySfx(n.sfx, n.sfxVolume);
             textPresenter.Show(story, n, OnTextDone);
+        }
+
+        /// <summary>No content of its own: just a curtain fade-in, then automatically moves to nextId.</summary>
+        void ShowStart(VNNodeData n)
+        {
+            curtainController.FadeIn(n.startFade, () => GoTo(n.nextId));
+        }
+
+        /// <summary>
+        /// Terminal: a curtain fade-out, then either a scene load (if endSceneToLoad parses to a
+        /// non-negative build index) or End() (story stays on the now-opaque curtain).
+        /// </summary>
+        void ShowEnd(VNNodeData n)
+        {
+            curtainController.FadeOut(n.endFade, () =>
+            {
+                if (int.TryParse(n.endSceneToLoad, out int sceneIndex) && sceneIndex >= 0)
+                    UnityEngine.SceneManagement.SceneManager.LoadScene(sceneIndex);
+                else
+                    End();
+            });
         }
 
         // ---------------------------------------------------------------- timeline clips

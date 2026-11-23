@@ -11,6 +11,13 @@ namespace VNKit
     public enum VNAnimType { None, Fade, SlideFromLeft, SlideFromRight, SlideFromBottom, SlideFromTop, Scale, Punch, Shake }
     public enum VNTrack { Background = 0, Music = 1 }
 
+    /// <summary>
+    /// What a frame is for. Story must be first (0) so frames serialized before this field existed
+    /// still deserialize as ordinary story frames. Exactly one Start frame is expected per story
+    /// (auto-created with the asset); any number of End frames is fine (a story can have several endings).
+    /// </summary>
+    public enum VNNodeKind { Story, Start, End }
+
     /// <summary>Type of a story variable. Unity can't serialize a union, so each def carries one default per type.</summary>
     public enum VNVarType { Bool, Int, Float, String }
 
@@ -27,6 +34,15 @@ namespace VNKit
         [Min(0f)] public float duration = 0.5f;
         [Min(0f)] public float delay = 0f;
         public Ease ease = Ease.OutQuad;
+    }
+
+    /// <summary>A plain full-screen fade, used by the Start frame's entrance and the End frame's exit curtain.</summary>
+    [Serializable]
+    public class VNFade
+    {
+        [Min(0f)] public float duration = 1f;
+        [Min(0f)] public float delay = 0f;
+        public Ease ease = Ease.InOutQuad;
     }
 
     /// <summary>Declares one story variable and its default value. Lives on the VNStory asset.</summary>
@@ -219,6 +235,16 @@ namespace VNKit
         [HideInInspector] public string nextId;
 
         public string title = "Frame";
+        public VNNodeKind kind = VNNodeKind.Story;
+
+        // Start-kind only: no content fields apply, just a curtain fade-in, then automatically nextId.
+        public VNFade startFade = new VNFade();
+
+        // End-kind only: no content fields apply (terminal - no outgoing link). A curtain fade-out,
+        // then either loads a scene (if endSceneToLoad parses to a build index) or just stays black.
+        public VNFade endFade = new VNFade();
+        public string endSceneToLoad = "";
+
         public VNLayout layout = VNLayout.Scene;
 
         // Scene layout
@@ -271,7 +297,6 @@ namespace VNKit
     [CreateAssetMenu(fileName = "NewStory", menuName = "Visual Novel/Story")]
     public class VNStory : ScriptableObject
     {
-        public string startNodeId;
         public VNTextStyle defaultTextStyle = new VNTextStyle();
         public List<VNVariableDef> variables = new List<VNVariableDef>();
         public List<VNNodeData> nodes = new List<VNNodeData>();
@@ -283,9 +308,10 @@ namespace VNKit
         // frames, so both are cached here and only rebuilt when something structural changes.
         [NonSerialized] Dictionary<string, VNNodeData> _index;
         [NonSerialized] List<VNNodeData> _orderedCache;
+        [NonSerialized] VNNodeData _startCache;
         [NonSerialized] bool _dirty = true;
 
-        /// <summary>Call after any structural edit (add/remove a frame, change a link, change startNodeId).
+        /// <summary>Call after any structural edit (add/remove a frame, change a link, change a frame's kind).
         /// The editor calls this for edits made through code; property-field edits invalidate via OnValidate.</summary>
         public void InvalidateCache()
         {
@@ -299,10 +325,13 @@ namespace VNKit
         {
             if (!_dirty && _index != null && _orderedCache != null) return;
             _index = new Dictionary<string, VNNodeData>(nodes.Count);
+            _startCache = null;
             for (int i = 0; i < nodes.Count; i++)
             {
                 var n = nodes[i];
-                if (n != null && !string.IsNullOrEmpty(n.id)) _index[n.id] = n;
+                if (n == null) continue;
+                if (!string.IsNullOrEmpty(n.id)) _index[n.id] = n;
+                if (n.kind == VNNodeKind.Start && _startCache == null) _startCache = n;
             }
             _orderedCache = BuildOrderedNodes();
             _dirty = false;
@@ -314,6 +343,17 @@ namespace VNKit
             RebuildIfNeeded();
             _index.TryGetValue(id, out var n);
             return n;
+        }
+
+        /// <summary>
+        /// The story's entry point: the one frame of kind Start. Falls back to the first frame in the
+        /// list for a story saved before Start frames existed (or one where it was deleted) - same
+        /// behavior the runtime always had.
+        /// </summary>
+        public VNNodeData GetStartNode()
+        {
+            RebuildIfNeeded();
+            return _startCache ?? (nodes.Count > 0 ? nodes[0] : null);
         }
 
         /// <summary>
@@ -332,9 +372,7 @@ namespace VNKit
             var visited = new HashSet<string>();
             var stack = new Stack<string>();
 
-            VNNodeData start = null;
-            if (!string.IsNullOrEmpty(startNodeId)) _index.TryGetValue(startNodeId, out start);
-            if (start == null && nodes.Count > 0) start = nodes[0];
+            var start = _startCache ?? (nodes.Count > 0 ? nodes[0] : null);
             if (start != null) stack.Push(start.id);
 
             while (stack.Count > 0)
@@ -346,7 +384,11 @@ namespace VNKit
                 result.Add(n);
 
                 var targets = new List<string>();
-                if (n.choices.Count > 0)
+                if (n.kind == VNNodeKind.End)
+                {
+                    // terminal: nothing comes after an End frame
+                }
+                else if (n.choices.Count > 0)
                 {
                     foreach (var c in n.choices) targets.Add(c.targetId);
                 }

@@ -49,7 +49,7 @@ namespace VNKitEditor
             extensionContainer.Add(textLabel);
 
             RebuildPorts();
-            RefreshVisuals(false);
+            RefreshVisuals();
         }
 
         public override Port InstantiatePort(Orientation orientation, Direction direction, Port.Capacity capacity, Type type)
@@ -64,7 +64,9 @@ namespace VNKitEditor
         }
 
         /// <summary>
-        /// With choices: one port per choice, plus a "+ choice" port to add another one.
+        /// A Start frame has a single "Next" port (one thread out, straight to the first real frame).
+        /// An End frame is terminal: no output ports at all.
+        /// A Story frame: with choices, one port per choice plus a "+ choice" port to add another.
         /// Without choices but with conditional branches: one "If N" port per branch (drag to link,
         /// same as a choice), a "+ branch" port to add another, and a "Next (else)" fallback port.
         /// With neither: a single "Next" port that accepts several threads (a 2nd thread turns the
@@ -75,7 +77,17 @@ namespace VNKitEditor
             outputContainer.Clear();
             OutputPorts.Clear();
 
-            if (Data.choices.Count > 0)
+            if (Data.kind == VNNodeKind.Start)
+            {
+                var next = MakeOutput("Next", NextIndex, Port.Capacity.Single);
+                next.tooltip = "Where the story begins once the entrance fade finishes.";
+                OutputPorts.Add(next);
+            }
+            else if (Data.kind == VNNodeKind.End)
+            {
+                // terminal: nothing links out of an End frame
+            }
+            else if (Data.choices.Count > 0)
             {
                 for (int i = 0; i < Data.choices.Count; i++)
                     OutputPorts.Add(MakeOutput((i + 1) + ". " + Short(Data.choices[i].text, 18), i, Port.Capacity.Single));
@@ -151,19 +163,44 @@ namespace VNKitEditor
             return p;
         }
 
-        public void RefreshVisuals(bool isStart)
+        public void RefreshVisuals()
         {
             string t = string.IsNullOrEmpty(Data.title) ? "Frame" : Data.title;
-            title = (isStart ? "\u25B6 " : "") + t;
-            if (isStart) titleContainer.style.backgroundColor = new Color(0.75f, 0.42f, 0.1f);
-            else titleContainer.style.backgroundColor = new StyleColor(StyleKeyword.Null);
+            switch (Data.kind)
+            {
+                case VNNodeKind.Start:
+                    title = "\u25B6 " + t;
+                    titleContainer.style.backgroundColor = new Color(0.75f, 0.42f, 0.1f);
+                    break;
+                case VNNodeKind.End:
+                    title = "\u25A0 " + t;
+                    titleContainer.style.backgroundColor = new Color(0.5f, 0.15f, 0.15f);
+                    break;
+                default:
+                    title = t;
+                    titleContainer.style.backgroundColor = new StyleColor(StyleKeyword.Null);
+                    break;
+            }
 
-            Sprite sprite = Data.layout == VNLayout.Scene ? Data.background : Data.image;
+            Sprite sprite = null;
+            if (Data.kind == VNNodeKind.Story)
+                sprite = Data.layout == VNLayout.SingleImage ? Data.image : Data.background;
             thumb.sprite = sprite;
             thumb.style.display = sprite != null ? DisplayStyle.Flex : DisplayStyle.None;
 
-            string speaker = string.IsNullOrEmpty(Data.speaker) ? "" : Data.speaker + ": ";
-            textLabel.text = Short(speaker + Data.text, 70);
+            string label;
+            switch (Data.kind)
+            {
+                case VNNodeKind.Start: label = $"Fades in over {Data.startFade.duration:0.##}s, then continues."; break;
+                case VNNodeKind.End: label = string.IsNullOrEmpty(Data.endSceneToLoad)
+                    ? $"Fades out over {Data.endFade.duration:0.##}s, then ends the story."
+                    : $"Fades out over {Data.endFade.duration:0.##}s, then loads scene {Data.endSceneToLoad}."; break;
+                default:
+                    string speaker = string.IsNullOrEmpty(Data.speaker) ? "" : Data.speaker + ": ";
+                    label = Short(speaker + Data.text, 70);
+                    break;
+            }
+            textLabel.text = label;
             textLabel.style.display = string.IsNullOrEmpty(textLabel.text) ? DisplayStyle.None : DisplayStyle.Flex;
         }
 
